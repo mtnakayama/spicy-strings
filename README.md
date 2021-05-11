@@ -1,4 +1,7 @@
 # spicy-strings
+
+**This program is under development. Expect breaking changes.**
+
 This repository is based on the `hotstrings` script from
 [cryzed/bin](https://github.com/cryzed/bin).
 
