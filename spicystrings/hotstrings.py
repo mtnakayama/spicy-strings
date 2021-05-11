@@ -1,13 +1,16 @@
 #!/usr/bin/env python
+from __future__ import annotations
 
 import argparse
-import collections
+from collections import deque
 import json
 import logging
 import os
 import signal
-import subprocess
 import sys
+from typing import Any
+
+from pygtrie import CharTrie
 
 import Xlib
 import Xlib.X
@@ -15,6 +18,8 @@ import Xlib.XK
 import Xlib.display
 import Xlib.ext.record
 import Xlib.protocol
+
+from .actions import Action
 
 EXIT_FAILURE = 1
 RECORD_CONTEXT_ARGUMENTS = (
@@ -32,6 +37,7 @@ RECORD_CONTEXT_ARGUMENTS = (
          'client_died': False
      },)
 )
+
 
 # Load xkb to access XK_ISO_Level3_Shift
 Xlib.XK.load_keysym_group('xkb')
@@ -64,10 +70,12 @@ def main():
                              'X Record Extension Library not found.\n')
 
     with open(path) as file:
-        hotstrings = json.load(file)
+        hotstrings_json = json.load(file)
 
-    if not hotstrings:
+    if not hotstrings_json:
         argument_parser.exit(EXIT_FAILURE, 'No hotstrings defined.\n')
+
+    hotstring_mapping = hotstring_lookup_from_json(hotstrings_json)
 
     record_context = record_connection.record_create_context(
         *RECORD_CONTEXT_ARGUMENTS)
@@ -75,9 +83,8 @@ def main():
     # Only keep at maximum the amount of characters of the longest hotstring
     # in the HotstringProcessor queue
     hotstring_processor = HotstringProcessor(
-        hotstrings,
-        connection,
-        max(len(k) for k in hotstrings.keys())
+        hotstring_mapping,
+        connection
     )
     record_handler = RecordHandler(connection, record_connection,
                                    hotstring_processor)
@@ -174,17 +181,24 @@ class RecordHandler:
 class HotstringProcessor:
     BACKSPACE_CHARACTER = '\x08'
 
-    def __init__(self, hotstrings, connection, queue_size):
-        self.hotstrings = hotstrings
+    def __init__(self, hotstring_lookup: CharTrie[str, Action], connection):
+        self.hotstring_mapping = hotstring_lookup
         self.connection = connection
-        self.queue = collections.deque(maxlen=queue_size)
+
+        maxlen = max(len(k) for k in hotstring_lookup.keys())
+        self.char_stack: deque[str] = deque(maxlen=maxlen)
+
         self.root_window = self.connection.screen().root
 
         # These stay the same for all requests, so just keep a local copy
-        self._default_key_press_event_arguments = dict(time=Xlib.X.CurrentTime, root=self.root_window,
-                                                       child=Xlib.X.NONE, root_x=0, root_y=0, event_x=0, event_y=0,
-                                                       same_screen=1)
-        self._default_key_release_event_arguments = self._default_key_press_event_arguments
+        self._default_key_press_event_arguments = dict(
+            time=Xlib.X.CurrentTime,
+            root=self.root_window,
+            child=Xlib.X.NONE,
+            root_x=0, root_y=0, event_x=0, event_y=0,
+            same_screen=1
+        )
+        self._default_key_release_event_arguments = self._default_key_press_event_arguments  # noqa: E501
 
     def make_key_press_event(self, detail, state, window, **kwargs):
         arguments = self._default_key_press_event_arguments.copy()
@@ -226,44 +240,55 @@ class HotstringProcessor:
         self.connection.flush()
 
     def __call__(self, character):
-        if character == self.BACKSPACE_CHARACTER and self.queue:
-            self.queue.pop()
-        else:
-            self.queue.append(character)
+        self.update_char_stack(character)
 
-        queue_string = ''.join(self.queue)
-        backspace = tuple(self.string_to_keycodes(self.BACKSPACE_CHARACTER))
         window = self.connection.get_input_focus().focus
-        for hotstring, (action, *arguments) in self.hotstrings.items():
-            if not queue_string.endswith(hotstring):
-                continue
 
-            # Remove typed hotstring before typing replacement
-            if action == 'replace':
-                replacement = arguments[0]
-            elif action == 'run-replace':
-                # The same as "run", but replaces the hotstring with the stdout of the executed process
-                with subprocess.Popen(arguments, stdout=subprocess.PIPE, universal_newlines=True) as process:
-                    replacement = process.stdout.read().strip()
-            elif action == 'run-replace-raw':
-                # The same as "run-replace" but doesn't strip whitespace at the ends
-                with subprocess.Popen(arguments, stdout=subprocess.PIPE, universal_newlines=True) as process:
-                    replacement = process.stdout.read()
-            elif action == 'run':
-                # To make use of various shell comforts simply run the command in a shell, for example:
-                #   "hotkey": ["run", "sh", "-c", "touch ~/Desktop/hello_world.txt"]
-                subprocess.Popen(arguments)
-                continue
-            else:
-                logging.info('Unrecognized action: %r.' % action)
-                continue
+        hotstring, action = self.hotstring_mapping.longest_prefix(
+            ''.join(self.char_stack))
 
-            # Linefeeds don't seem to be sent by Xlib, so replace them with carriage returns: normalize \r\n to \r
+        if hotstring:
+            replacement = action.replacement()
+
+            self.type_backspaces(len(hotstring), window)
+
+            # Linefeeds don't seem to be sent by Xlib, so replace them with
+            # carriage returns: normalize \r\n to \r
             # first, then replace all remaining \n with \r
             replacement = replacement.replace('\r\n', '\r').replace('\n', '\r')
-            self.type_keycodes(backspace * len(hotstring), window)
             self.type_keycodes(self.string_to_keycodes(replacement), window)
-            self.queue.clear()
+
+            self.char_stack.clear()
+            logging.info(f'HotstringProcessor.char_stack: {self.char_stack}')
+
+    def update_char_stack(self, character):
+        """Append or delete characters from buffer"""
+        if character == self.BACKSPACE_CHARACTER:
+            try:
+                self.char_stack.popleft()
+            except IndexError:
+                pass  # deque was empty
+        else:
+            self.char_stack.appendleft(character)
+        logging.info(f'HotstringProcessor.char_stack: {self.char_stack}')
+
+    def type_backspaces(self, num_times, window):
+        backspace = tuple(
+            self.string_to_keycodes(self.BACKSPACE_CHARACTER)
+        )
+        self.type_keycodes(backspace * num_times, window)
+
+
+def hotstring_lookup_from_json(hotstrings: Any) -> CharTrie[str, Action]:
+    """Returns a CharTrie mapping a reversed hotstring to an Action."""
+    def get_key_value():
+        for hotstring, action_code in hotstrings.items():
+            # require space to trigger hotstring
+            key = ' ' + ''.join(reversed(hotstring))
+            value = Action.from_list(action_code)
+            yield key, value
+
+    return CharTrie(get_key_value())
 
 
 if __name__ == '__main__':
