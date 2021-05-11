@@ -262,10 +262,14 @@ class HotstringProcessor:
 
     def update_char_stack(self, character):
         """Append or delete characters from buffer"""
-        if character == self.BACKSPACE_CHARACTER and self.char_stack:
-            self.char_stack.popleft()
+        if character == self.BACKSPACE_CHARACTER:
+            try:
+                self.char_stack.popleft()
+            except IndexError:
+                pass  # deque was empty
         else:
             self.char_stack.appendleft(character)
+        logging.info(f'HotstringProcessor.char_stack: {self.char_stack}')
 
     def type_backspaces(self, num_times, window):
         backspace = tuple(
@@ -276,8 +280,14 @@ class HotstringProcessor:
 
 def hotstring_lookup_from_json(hotstrings: Any) -> CharTrie[str, Action]:
     """Returns a CharTrie mapping a reversed hotstring to an Action."""
-    return CharTrie((reversed(hotstring), Action.from_list(action_code))
-                    for hotstring, action_code in hotstrings.items())
+    def get_key_value():
+        for hotstring, action_code in hotstrings.items():
+            # require space to trigger hotstring
+            key = ' ' + ''.join(reversed(hotstring))
+            value = Action.from_list(action_code)
+            yield key, value
+
+    return CharTrie(get_key_value())
 
 
 if __name__ == '__main__':
