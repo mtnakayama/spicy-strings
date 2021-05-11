@@ -1,6 +1,6 @@
 # spicy-strings
 
-**This program is under development. Expect breaking changes.**
+**This program is under development. Expect breaking changes. This readme file may not be up to date.**
 
 This repository is based on the `hotstrings` script from
 [cryzed/bin](https://github.com/cryzed/bin).
