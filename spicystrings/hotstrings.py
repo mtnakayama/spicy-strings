@@ -19,6 +19,7 @@ import Xlib.display
 import Xlib.ext.record
 import Xlib.protocol
 
+from . import ahk_parser
 from .actions import Action
 
 EXIT_FAILURE = 1
@@ -70,12 +71,7 @@ def main():
                              'X Record Extension Library not found.\n')
 
     with open(path) as file:
-        hotstrings_json = json.load(file)
-
-    if not hotstrings_json:
-        argument_parser.exit(EXIT_FAILURE, 'No hotstrings defined.\n')
-
-    hotstring_mapping = hotstring_lookup_from_json(hotstrings_json)
+        hotstring_mapping, end_chars = ahk_parser.read_mapping(file)
 
     record_context = record_connection.record_create_context(
         *RECORD_CONTEXT_ARGUMENTS)
@@ -84,6 +80,7 @@ def main():
     # in the HotstringProcessor queue
     hotstring_processor = HotstringProcessor(
         hotstring_mapping,
+        end_chars,
         connection
     )
     record_handler = RecordHandler(connection, record_connection,
@@ -181,11 +178,13 @@ class RecordHandler:
 class HotstringProcessor:
     BACKSPACE_CHARACTER = '\x08'
 
-    def __init__(self, hotstring_lookup: CharTrie[str, Action], connection):
+    def __init__(self, hotstring_lookup: CharTrie[str, Action], end_chars: str,
+                 connection):
         self.hotstring_mapping = hotstring_lookup
+        self.end_chars = end_chars
         self.connection = connection
 
-        maxlen = max(len(k) for k in hotstring_lookup.keys())
+        maxlen = max(len(k) for k in hotstring_lookup.keys()) + 1
         self.char_stack: deque[str] = deque(maxlen=maxlen)
 
         self.root_window = self.connection.screen().root
@@ -240,26 +239,31 @@ class HotstringProcessor:
         self.connection.flush()
 
     def __call__(self, character):
-        self.update_char_stack(character)
+        if character in self.end_chars:
+            window = self.connection.get_input_focus().focus
 
-        window = self.connection.get_input_focus().focus
+            hotstring, action = self.hotstring_mapping.longest_prefix(
+                ''.join(self.char_stack))
 
-        hotstring, action = self.hotstring_mapping.longest_prefix(
-            ''.join(self.char_stack))
+            if hotstring:
+                replacement = action.replacement()
 
-        if hotstring:
-            replacement = action.replacement()
+                self.type_backspaces(len(hotstring) + 1, window)
 
-            self.type_backspaces(len(hotstring), window)
+                # Linefeeds don't seem to be sent by Xlib, so replace them with
+                # carriage returns: normalize \r\n to \r
+                # first, then replace all remaining \n with \r
+                replacement = replacement.replace('\r\n', '\r').replace('\n',
+                                                                        '\r')
+                self.type_keycodes(self.string_to_keycodes(replacement),
+                                   window)
+                self.type_keycodes(self.string_to_keycodes(character), window)
 
-            # Linefeeds don't seem to be sent by Xlib, so replace them with
-            # carriage returns: normalize \r\n to \r
-            # first, then replace all remaining \n with \r
-            replacement = replacement.replace('\r\n', '\r').replace('\n', '\r')
-            self.type_keycodes(self.string_to_keycodes(replacement), window)
-
-            self.char_stack.clear()
-            logging.info(f'HotstringProcessor.char_stack: {self.char_stack}')
+                self.char_stack.clear()
+                logging.info('HotstringProcessor.char_stack: '
+                             f'{self.char_stack}')
+        else:
+            self.update_char_stack(character)
 
     def update_char_stack(self, character):
         """Append or delete characters from buffer"""

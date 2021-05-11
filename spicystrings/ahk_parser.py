@@ -5,6 +5,29 @@ from typing import NamedTuple
 
 from pygtrie import CharTrie
 
+from .actions import Action, Replace
+
+
+def read_mapping(fp) -> tuple[CharTrie[str, Action], str]:
+    end_chars = '-()[]{}:;\'"/\\,.?!\n \t'
+
+    hotstrings: list[Hotstring] = []
+    for line in (x.strip() for x in fp.readlines()):
+        if not line:
+            pass
+        elif line.startswith(':'):
+            hotstrings.append(parse_hotstring_line(line))
+        elif line.startswith('#'):
+            end_chars = parse_directive(line)
+
+    mapping = CharTrie()
+    for _, hotstring, replacement in hotstrings:
+        action = Replace(replacement)
+        match_str = ''.join(reversed(hotstring))
+        mapping[match_str] = action
+
+    return mapping, end_chars
+
 
 def parse_directive(line: str) -> str:
     if match_obj := re.match(r'#Hotstring\s+EndChars\s+', line):
