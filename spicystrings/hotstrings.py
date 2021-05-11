@@ -259,6 +259,7 @@ class HotstringProcessor:
             self.type_keycodes(self.string_to_keycodes(replacement), window)
 
             self.char_stack.clear()
+            logging.info(f'HotstringProcessor.char_stack: {self.char_stack}')
 
     def update_char_stack(self, character):
         """Append or delete characters from buffer"""
