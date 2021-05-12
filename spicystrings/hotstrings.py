@@ -215,6 +215,9 @@ def replace_newlines_with_cr(string: str):
 class HotstringDetector:
     """Contains the state of recently typed characters and determines when an
     Action should be triggered."""
+
+    MIN_BUFFER_SIZE = 1024
+
     def __init__(self, hotstring_definitions: Iterable[HotstringDefinition],
                  global_hotstring_options: GlobalHotstringOptions):
 
@@ -232,7 +235,8 @@ class HotstringDetector:
             self._add_hotstring(hotstring_def)
 
     def _calc_maxlen(self, hotstring_definitions):
-        return max(len(x.hotstring) for x in hotstring_definitions) * 2
+        longest = max(len(x.hotstring) for x in hotstring_definitions)
+        return max(self.MIN_BUFFER_SIZE, longest * 2)
 
     def _add_hotstring(self, hotstring_definition: HotstringDefinition):
         match_str = reversed(hotstring_definition.hotstring)
