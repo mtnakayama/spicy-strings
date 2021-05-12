@@ -9,7 +9,6 @@ import logging
 import os
 import re
 import signal
-import sys
 from typing import Optional, Tuple
 
 from pygtrie import CharTrie
