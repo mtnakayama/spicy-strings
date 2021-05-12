@@ -15,6 +15,26 @@ class TestHotstringDetector(TestCase):
         expected = [None, None, ('yl ', 'yield ')]
         self.check_hotstring_output(hotstring_detector, typed, expected)
 
+    def test_hotstring_as_string_end(self):
+        """a normal hotstring should not trigger if it is only a subsring."""
+        hotstring_definitions = [HotstringDefinition('yl', Replace('yield'))]
+        hotstring_detector = self.get_basic_hotstring_detector(
+            hotstring_definitions)
+
+        typed = 'ayl '
+        expected = [None] * 4
+        self.check_hotstring_output(hotstring_detector, typed, expected)
+
+    def test_hotstring_as_string_beginning(self):
+        """a normal hotstring should not trigger if it is only a subsring."""
+        hotstring_definitions = [HotstringDefinition('yl', Replace('yield'))]
+        hotstring_detector = self.get_basic_hotstring_detector(
+            hotstring_definitions)
+
+        typed = 'yla '
+        expected = [None] * 4
+        self.check_hotstring_output(hotstring_detector, typed, expected)
+
     def test_hotstring_no_end_char(self):
         hotstring_definitions = [HotstringDefinition(
             'yl',
@@ -42,6 +62,22 @@ class TestHotstringDetector(TestCase):
 
         typed = 'a.a.'
         expected = [None, ('a.', 'abracadabra'), None, ('a.', 'abracadabra')]
+        self.check_hotstring_output(hotstring_detector, typed, expected)
+
+    def test_no_end_char_as_substring(self):
+        """Verified behavior with AHK 1.1.33.09"""
+        hotstring_definitions = [
+            HotstringDefinition(
+                'a',
+                Replace('abracadabra'),
+                {HotstringFlags.NO_END_CHAR}
+                )
+            ]
+        hotstring_detector = self.get_basic_hotstring_detector(
+            hotstring_definitions)
+
+        typed = 'Za'
+        expected = [None, ('a', 'abracadabra')]
         self.check_hotstring_output(hotstring_detector, typed, expected)
 
     def test_no_end_char_backspace(self):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from collections.abc import Iterable
+from itertools import takewhile
 import logging
 import os
 import re
@@ -216,7 +217,7 @@ class HotstringDetector:
     """Contains the state of recently typed characters and determines when an
     Action should be triggered."""
 
-    MIN_BUFFER_SIZE = 1024
+    MIN_BUFFER_SIZE = 128
 
     def __init__(self, hotstring_definitions: Iterable[HotstringDefinition],
                  global_hotstring_options: GlobalHotstringOptions):
@@ -224,7 +225,7 @@ class HotstringDetector:
         self.global_hotstring_options = global_hotstring_options
 
         # a mapping of reversed hotstring to HotstringDefinition
-        self._end_char_hotstrings: CharTrie[HotstringDefinition] = CharTrie()
+        self._end_char_hotstrings: dict[str, HotstringDefinition] = {}
         # mapping for the hotstings that trigger without an end char
         self._no_end_char_hotstrings: CharTrie[HotstringDefinition] = CharTrie()  # noqa
 
@@ -239,7 +240,7 @@ class HotstringDetector:
         return max(self.MIN_BUFFER_SIZE, longest * 2)
 
     def _add_hotstring(self, hotstring_definition: HotstringDefinition):
-        match_str = reversed(hotstring_definition.hotstring)
+        match_str = ''.join(reversed(hotstring_definition.hotstring))
 
         if HotstringFlags.NO_END_CHAR in hotstring_definition.flags:
             self._no_end_char_hotstrings[match_str] = hotstring_definition
@@ -262,35 +263,42 @@ class HotstringDetector:
             None if there was no hotstring triggered.
         """
         if char in self.global_hotstring_options.end_chars:
-            hotstring_match = self._match_hotstring(
-                self._end_char_hotstrings, char)
-            if hotstring_match:
+            hotstring_definition = self._match_last_word()
+            if hotstring_definition:
                 self.reset_char_state()
-                return hotstring_match
+                return (hotstring_definition.hotstring + char,
+                        lambda: hotstring_definition.action() + char)  # type: ignore # noqa
 
         self._update_char_state(char)
 
-        hotstring_match = self._match_hotstring(
-            self._no_end_char_hotstrings, '')
-        if hotstring_match:
+        hotstring_definition = self._match_end_of_string()
+        if hotstring_definition:
             self.reset_char_state()
-            return hotstring_match
+            return (hotstring_definition.hotstring,
+                    hotstring_definition.action)  # type: ignore
 
         return None
 
-    def _match_hotstring(self,
-                         hotstring_mapping: CharTrie[HotstringDefinition],
-                         end_char: str) -> Optional[Tuple[str, Action]]:
+    def _match_last_word(self) -> Optional[HotstringDefinition]:
+        """Check for a hotstring only in the characters typed after an end char
+        """
+        end_chars = self.global_hotstring_options.end_chars
+        last_word = ''.join(takewhile(lambda x: x not in end_chars,
+                                      self._char_stack))
+        try:
+            hotstring_definition = self._end_char_hotstrings[last_word]
+            return hotstring_definition
+        except KeyError:
+            return None
+
+    def _match_end_of_string(self) -> Optional[HotstringDefinition]:
         """Check if the recently typed characters match a hotstring"""
 
         recently_typed = ''.join(self._char_stack)
-        step = hotstring_mapping.longest_prefix(recently_typed)
+        step = self._no_end_char_hotstrings.longest_prefix(recently_typed)
         if step:
             _, hotstring_definition = step
-            trigger_str = hotstring_definition.hotstring + end_char
-
-            return (trigger_str,
-                    lambda: hotstring_definition.action() + end_char)
+            return hotstring_definition
         return None
 
     def _update_char_state(self, char: str):
