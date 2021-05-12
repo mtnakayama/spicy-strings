@@ -1,32 +1,27 @@
-from dataclasses import dataclass, replace
+from collections.abc import Collection
 from enum import auto, Enum
 import re
-from typing import NamedTuple
 
 from pygtrie import CharTrie
 
-from .actions import Action, Replace
+from .actions import (DEFAULT_END_CHARS, GlobalHotstringOptions,
+                      HotstringDefinition, Replace)
 
 
-def read_mapping(fp) -> tuple[CharTrie[str, Action], str]:
-    end_chars = '-()[]{}:;\'"/\\,.?!\n \t'
+def read_mapping(fp) -> tuple[Collection[HotstringDefinition],
+                              GlobalHotstringOptions]:
+    end_chars = DEFAULT_END_CHARS
 
-    hotstrings: list[Hotstring] = []
+    hotstrings: list[HotstringDefinition] = []
     for line in (x.strip() for x in fp.readlines()):
         if not line:
             pass
         elif line.startswith(':'):
             hotstrings.append(parse_hotstring_line(line))
         elif line.startswith('#'):
-            end_chars = parse_directive(line)
+            end_chars = frozenset(parse_directive(line))
 
-    mapping = CharTrie()
-    for _, hotstring, replacement in hotstrings:
-        action = Replace(replacement)
-        match_str = ''.join(reversed(hotstring))
-        mapping[match_str] = action
-
-    return mapping, end_chars
+    return hotstrings, GlobalHotstringOptions(end_chars=end_chars)
 
 
 def parse_directive(line: str) -> str:
@@ -39,12 +34,6 @@ def parse_directive(line: str) -> str:
     return unescape_ahk_string(endchars)
 
 
-class Hotstring(NamedTuple):
-    options: str
-    hotstring: str
-    replacement: str
-
-
 class ParseHotstringState(Enum):
     START = auto()
     OPTIONS = auto()
@@ -53,7 +42,7 @@ class ParseHotstringState(Enum):
     REPLACEMENT = auto()
 
 
-def parse_hotstring_line(line: str) -> Hotstring:
+def parse_hotstring_line(line: str) -> HotstringDefinition:
     parse_state = ParseHotstringState.START
 
     for i, char in enumerate(line):
@@ -85,7 +74,7 @@ def parse_hotstring_line(line: str) -> Hotstring:
 
     replacement = line[substring_start:]
 
-    return Hotstring(options, hotstring, replacement)
+    return HotstringDefinition(hotstring, Replace(replacement))
 
 
 AHK_ESCAPE_SEQUENCES = CharTrie({

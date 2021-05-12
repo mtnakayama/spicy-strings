@@ -1,63 +1,56 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import auto, Enum
 import subprocess
+from collections.abc import Callable, Set
 
 
-class Action:
-    def replacement(self) -> str:
-        raise NotImplementedError
-
-    @staticmethod
-    def from_list(action_list: list[str]) -> Action:
-        action, *arguments = action_list
-
-        if action == 'replace':
-            replacement_str, = arguments
-            return Replace(replacement_str)
-        elif action == 'run-replace':
-            return RunReplace(arguments)
-        elif action == 'run-replace-raw':
-            return RunReplaceRaw(arguments)
-        elif action == 'run':
-            return Run(arguments)
-        else:
-            raise ValueError(f'Unrecognized action: "{action}".')
+DEFAULT_END_CHARS = frozenset('-()[]{}:;\'"/\\,.?!\n \t')
 
 
-class Replace(Action):
-    """Remove typed hotstring before typing replacement"""
-    def __init__(self, replacement_str: str):
-        self.replacement_str = replacement_str
-
-    def replacement(self) -> str:
-        return self.replacement_str
+@dataclass(frozen=True)
+class GlobalHotstringOptions:
+    end_chars: Set[str] = DEFAULT_END_CHARS
+    flags: Set[HotstringFlags] = frozenset()
 
 
-class RunReplace(Action):
-    """The same as Run, but replaces the hotstring with the stdout of the
-    executed process
-    """
-    def __init__(self, command: list[str]):
-        self.command = command
-
-    def replacement(self) -> str:
-        with subprocess.Popen(self.command, stdout=subprocess.PIPE,
-                              universal_newlines=True) as process:
-            return process.stdout.read().strip()
+@dataclass(frozen=True)
+class HotstringDefinition:
+    hotstring: str
+    action: Action
+    flags: Set[HotstringFlags] = frozenset()
 
 
-class RunReplaceRaw(RunReplace):
-    """The same as "run-replace" but doesn't strip whitespace at the ends"""
+class HotstringFlags(Enum):
+    NO_END_CHAR = auto()
+    NO_BACKSPACE = auto()
+    CASE_SENSITIVE = auto()
+    IGNORE_CASE = auto()  # do not conform to typed case
+    OMIT_END_CHAR = auto()
 
-    def replacement(self) -> str:
-        with subprocess.Popen(self.command, stdout=subprocess.PIPE,
+
+Action = Callable[[], str]
+
+
+def Replace(replacement_str: str) -> Action:
+    return lambda: replacement_str
+
+
+def RunReplaceRaw(command: list[str]) -> Action:
+    def func():
+        with subprocess.Popen(command, stdout=subprocess.PIPE,
                               universal_newlines=True) as process:
             return process.stdout.read()
 
+    return func
 
-class Run(RunReplace):
-    """Perform no replacement. Simply runs a command."""
 
-    def replacement(self) -> str:
-        subprocess.Popen(self.command)
-        return ''
+def RunReplace(command: list[str]) -> Action:
+    func = RunReplaceRaw(command)
+    return lambda: func().strip()
+
+
+def Run(command: list[str]) -> Action:
+    func = RunReplaceRaw(command)
+    return lambda: func() and ''

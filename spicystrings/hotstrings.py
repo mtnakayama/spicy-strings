@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-import json
+from collections.abc import Iterable
 import logging
 import os
+import re
 import signal
 import sys
-from typing import Any
+from typing import Optional, Tuple
 
 from pygtrie import CharTrie
 
@@ -20,7 +21,8 @@ import Xlib.ext.record
 import Xlib.protocol
 
 from . import ahk_parser
-from .actions import Action
+from .actions import (Action, GlobalHotstringOptions, HotstringDefinition,
+                      HotstringFlags)
 
 EXIT_FAILURE = 1
 RECORD_CONTEXT_ARGUMENTS = (
@@ -71,16 +73,21 @@ def main():
                              'X Record Extension Library not found.\n')
 
     with open(path) as file:
-        hotstring_mapping, end_chars = ahk_parser.read_mapping(file)
+        hotstrings, global_hotstring_options = ahk_parser.read_mapping(file)
+
+    print(hotstrings)
+    print(global_hotstring_options)
 
     record_context = record_connection.record_create_context(
         *RECORD_CONTEXT_ARGUMENTS)
 
+    hotstring_detector = HotstringDetector(hotstrings,
+                                           global_hotstring_options)
+
     # Only keep at maximum the amount of characters of the longest hotstring
     # in the HotstringProcessor queue
     hotstring_processor = HotstringProcessor(
-        hotstring_mapping,
-        end_chars,
+        hotstring_detector,
         connection
     )
     record_handler = RecordHandler(connection, record_connection,
@@ -178,14 +185,9 @@ class RecordHandler:
 class HotstringProcessor:
     BACKSPACE_CHARACTER = '\x08'
 
-    def __init__(self, hotstring_lookup: CharTrie[str, Action], end_chars: str,
-                 connection):
-        self.hotstring_mapping = hotstring_lookup
-        self.end_chars = end_chars
+    def __init__(self, hotstring_detector: HotstringDetector, connection):
+        self.hotstring_detector = hotstring_detector
         self.connection = connection
-
-        maxlen = max(len(k) for k in hotstring_lookup.keys()) + 1
-        self.char_stack: deque[str] = deque(maxlen=maxlen)
 
         self.root_window = self.connection.screen().root
 
@@ -199,6 +201,23 @@ class HotstringProcessor:
         )
         self._default_key_release_event_arguments = self._default_key_press_event_arguments  # noqa: E501
 
+    def __call__(self, char):
+        matched = self.hotstring_detector.next_typed_char(char)
+        if matched:
+            window = self.connection.get_input_focus().focus
+            trigger_str, action = matched
+
+            self.type_string('\b' * len(trigger_str), window)
+
+            replacement = action()
+            # Linefeeds don't seem to be sent by Xlib, so replace them with
+            # carriage returns
+            replacement = replace_newlines_with_cr(replacement)
+
+            self.type_string(replacement, window)
+
+
+
     def make_key_press_event(self, detail, state, window, **kwargs):
         arguments = self._default_key_press_event_arguments.copy()
         arguments.update(kwargs)
@@ -208,6 +227,23 @@ class HotstringProcessor:
         arguments = self._default_key_release_event_arguments.copy()
         arguments.update(kwargs)
         return Xlib.protocol.event.KeyRelease(detail=detail, state=state, window=window, **arguments)
+
+    def type_backspaces(self, num: int, window):
+        self.type_string('\b' * num, window)
+
+    def type_string(self, string: str, window):
+        self.type_keycodes(self.string_to_keycodes(string), window)
+
+    def type_keycodes(self, keycodes, window):
+        for keycode in keycodes:
+            self.type_keycode(keycode, window)
+
+        self.connection.flush()
+
+    def type_keycode(self, keycode, window):
+        detail, state = keycode
+        window.send_event(self.make_key_press_event(detail, state, window))
+        window.send_event(self.make_key_release_event(detail, state, window))
 
     # TODO: Figure out a way to find keycodes not assigned in the current keyboard mapping
     def string_to_keycodes(self, string_):
@@ -227,72 +263,108 @@ class HotstringProcessor:
 
             yield keycode
 
-    def type_keycode(self, keycode, window):
-        detail, state = keycode
-        window.send_event(self.make_key_press_event(detail, state, window))
-        window.send_event(self.make_key_release_event(detail, state, window))
 
-    def type_keycodes(self, keycodes, window):
-        for keycode in keycodes:
-            self.type_keycode(keycode, window)
+MATCH_NEWLINE = re.compile(r'\r?\n')
 
-        self.connection.flush()
 
-    def __call__(self, character):
-        if character in self.end_chars:
-            window = self.connection.get_input_focus().focus
+def replace_newlines_with_cr(string: str):
+    """Replace linefeeds with carriage returns"""
+    return MATCH_NEWLINE.sub('\r', string)
 
-            hotstring, action = self.hotstring_mapping.longest_prefix(
-                ''.join(self.char_stack))
 
-            if hotstring:
-                replacement = action.replacement()
+class HotstringDetector:
+    """Contains the state of recently typed characters and determines when an
+    Action should be triggered."""
+    def __init__(self, hotstring_definitions: Iterable[HotstringDefinition],
+                 global_hotstring_options: GlobalHotstringOptions):
 
-                self.type_backspaces(len(hotstring) + 1, window)
+        self.global_hotstring_options = global_hotstring_options
 
-                # Linefeeds don't seem to be sent by Xlib, so replace them with
-                # carriage returns: normalize \r\n to \r
-                # first, then replace all remaining \n with \r
-                replacement = replacement.replace('\r\n', '\r').replace('\n',
-                                                                        '\r')
-                self.type_keycodes(self.string_to_keycodes(replacement),
-                                   window)
-                self.type_keycodes(self.string_to_keycodes(character), window)
+        # a mapping of reversed hotstring to HotstringDefinition
+        self._end_char_hotstrings: CharTrie[HotstringDefinition] = CharTrie()
+        # mapping for the hotstings that trigger without an end char
+        self._no_end_char_hotstrings: CharTrie[HotstringDefinition] = CharTrie()  # noqa
 
-                self.char_stack.clear()
-                logging.info('HotstringProcessor.char_stack: '
-                             f'{self.char_stack}')
+        maxlen = self._calc_maxlen(hotstring_definitions)
+        self._char_stack: deque[str] = deque(maxlen=maxlen)
+
+        for hotstring_def in hotstring_definitions:
+            self._add_hotstring(hotstring_def)
+
+    def _calc_maxlen(self, hotstring_definitions):
+        return max(len(x.hotstring) for x in hotstring_definitions)
+
+    def _add_hotstring(self, hotstring_definition: HotstringDefinition):
+        match_str = reversed(hotstring_definition.hotstring)
+
+        if HotstringFlags.NO_END_CHAR in hotstring_definition.flags:
+            self._no_end_char_hotstrings[match_str] = hotstring_definition
         else:
-            self.update_char_stack(character)
+            print('end char')
+            self._end_char_hotstrings[match_str] = hotstring_definition
 
-    def update_char_stack(self, character):
+    def next_typed_char(self, char: str) -> \
+            Optional[Tuple[str, Action]]:
+        """Adds `char` to the internal buffer of typed character. Returns the
+        triggering string and the HotstringDefinition if a hotstring was
+        triggered.
+
+        Args:
+            char: the character that was just typed
+
+        Returns:
+            A tuple containing the string that was replaced (including the end
+            char if applicable) and the HotstringDefinition that was triggered.
+            None if there was no hotstring triggered.
+        """
+        if char in self.global_hotstring_options.end_chars:
+            hotstring_match = self._match_hotstring(
+                self._end_char_hotstrings, char)
+            if hotstring_match:
+                self.reset_char_state()
+                return hotstring_match
+
+        self._update_char_state(char)
+
+        hotstring_match = self._match_hotstring(
+            self._no_end_char_hotstrings, '')
+        if hotstring_match:
+            self.reset_char_state()
+            return hotstring_match
+
+        return None
+
+    def _match_hotstring(self,
+                         hotstring_mapping: CharTrie[HotstringDefinition],
+                         end_char: str) -> Optional[Tuple[str, Action]]:
+        """Check if the recently typed characters match a hotstring"""
+
+        recently_typed = ''.join(self._char_stack)
+        step = hotstring_mapping.longest_prefix(recently_typed)
+        if step:
+            _, hotstring_definition = step
+            trigger_str = hotstring_definition.hotstring + end_char
+
+            return (trigger_str,
+                    lambda: hotstring_definition.action() + end_char)
+        return None
+
+    def _update_char_state(self, char: str):
         """Append or delete characters from buffer"""
-        if character == self.BACKSPACE_CHARACTER:
+        if char == '\b':
             try:
-                self.char_stack.popleft()
+                self._char_stack.popleft()
             except IndexError:
                 pass  # deque was empty
         else:
-            self.char_stack.appendleft(character)
-        logging.info(f'HotstringProcessor.char_stack: {self.char_stack}')
+            self._char_stack.appendleft(char)
+        logging.info(f'_char_stack: {self._char_stack}')
 
-    def type_backspaces(self, num_times, window):
-        backspace = tuple(
-            self.string_to_keycodes(self.BACKSPACE_CHARACTER)
-        )
-        self.type_keycodes(backspace * num_times, window)
-
-
-def hotstring_lookup_from_json(hotstrings: Any) -> CharTrie[str, Action]:
-    """Returns a CharTrie mapping a reversed hotstring to an Action."""
-    def get_key_value():
-        for hotstring, action_code in hotstrings.items():
-            # require space to trigger hotstring
-            key = ' ' + ''.join(reversed(hotstring))
-            value = Action.from_list(action_code)
-            yield key, value
-
-    return CharTrie(get_key_value())
+    def reset_char_state(self):
+        """Resets the state of the buffer tha tracks recently typed
+        characters."""
+        self._char_stack.clear()
+        logging.info(f'_char_stack: {self._char_stack}')
 
 
 if __name__ == '__main__':
