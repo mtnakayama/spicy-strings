@@ -23,6 +23,7 @@ import Xlib.protocol
 from . import ahk_parser
 from .actions import (Action, GlobalHotstringOptions, HotstringDefinition,
                       HotstringFlags)
+from .keyboard import BaseTyper, Typer
 
 EXIT_FAILURE = 1
 RECORD_CONTEXT_ARGUMENTS = (
@@ -88,7 +89,7 @@ def main():
     # in the HotstringProcessor queue
     hotstring_processor = HotstringProcessor(
         hotstring_detector,
-        connection
+        Typer(connection)
     )
     record_handler = RecordHandler(connection, record_connection,
                                    hotstring_processor)
@@ -183,85 +184,24 @@ class RecordHandler:
 
 
 class HotstringProcessor:
-    BACKSPACE_CHARACTER = '\x08'
-
-    def __init__(self, hotstring_detector: HotstringDetector, connection):
+    def __init__(self, hotstring_detector: HotstringDetector,
+                 typer: BaseTyper):
         self.hotstring_detector = hotstring_detector
-        self.connection = connection
-
-        self.root_window = self.connection.screen().root
-
-        # These stay the same for all requests, so just keep a local copy
-        self._default_key_press_event_arguments = dict(
-            time=Xlib.X.CurrentTime,
-            root=self.root_window,
-            child=Xlib.X.NONE,
-            root_x=0, root_y=0, event_x=0, event_y=0,
-            same_screen=1
-        )
-        self._default_key_release_event_arguments = self._default_key_press_event_arguments  # noqa: E501
+        self.typer = typer
 
     def __call__(self, char):
         matched = self.hotstring_detector.next_typed_char(char)
         if matched:
-            window = self.connection.get_input_focus().focus
             trigger_str, action = matched
 
-            self.type_string('\b' * len(trigger_str), window)
+            self.typer.type_string('\b' * len(trigger_str))
 
             replacement = action()
             # Linefeeds don't seem to be sent by Xlib, so replace them with
             # carriage returns
             replacement = replace_newlines_with_cr(replacement)
 
-            self.type_string(replacement, window)
-
-
-
-    def make_key_press_event(self, detail, state, window, **kwargs):
-        arguments = self._default_key_press_event_arguments.copy()
-        arguments.update(kwargs)
-        return Xlib.protocol.event.KeyPress(detail=detail, state=state, window=window, **arguments)
-
-    def make_key_release_event(self, detail, state, window, **kwargs):
-        arguments = self._default_key_release_event_arguments.copy()
-        arguments.update(kwargs)
-        return Xlib.protocol.event.KeyRelease(detail=detail, state=state, window=window, **arguments)
-
-    def type_backspaces(self, num: int, window):
-        self.type_string('\b' * num, window)
-
-    def type_string(self, string: str, window):
-        self.type_keycodes(self.string_to_keycodes(string), window)
-
-    def type_keycodes(self, keycodes, window):
-        for keycode in keycodes:
-            self.type_keycode(keycode, window)
-
-        self.connection.flush()
-
-    def type_keycode(self, keycode, window):
-        detail, state = keycode
-        window.send_event(self.make_key_press_event(detail, state, window))
-        window.send_event(self.make_key_release_event(detail, state, window))
-
-    # TODO: Figure out a way to find keycodes not assigned in the current keyboard mapping
-    def string_to_keycodes(self, string_):
-        for character in string_:
-            code_point = ord(character)
-
-            # TODO: Take a look at other projects using python-xlib to improve this
-            # See Xlib.XK.keysym_to_string
-            keycodes = tuple(self.connection.keysym_to_keycodes(code_point) or
-                             self.connection.keysym_to_keycodes(0xFF00 | code_point))
-            keycode = keycodes[0] if keycodes else None
-
-            # TODO: Remap missing characters to available keycodes
-            if not keycode:
-                logging.info('No keycode found for: %r.' % character, file=sys.stderr)
-                continue
-
-            yield keycode
+            self.typer.type_string(replacement)
 
 
 MATCH_NEWLINE = re.compile(r'\r?\n')
@@ -292,7 +232,7 @@ class HotstringDetector:
             self._add_hotstring(hotstring_def)
 
     def _calc_maxlen(self, hotstring_definitions):
-        return max(len(x.hotstring) for x in hotstring_definitions)
+        return max(len(x.hotstring) for x in hotstring_definitions) * 2
 
     def _add_hotstring(self, hotstring_definition: HotstringDefinition):
         match_str = reversed(hotstring_definition.hotstring)
