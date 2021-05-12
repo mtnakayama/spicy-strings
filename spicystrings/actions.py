@@ -6,7 +6,7 @@ import subprocess
 from collections.abc import Callable, Set
 
 
-DEFAULT_END_CHARS = frozenset('-()[]{}:;\'"/\\,.?!\n \t')
+DEFAULT_END_CHARS = frozenset('-()[]{}:;\'"/\\,.?!\r\n \t')
 
 
 @dataclass(frozen=True)
