@@ -15,6 +15,24 @@ class TestHotstringDetector(TestCase):
         expected = [None, None, ('yl ', 'yield ')]
         self.check_hotstring_output(hotstring_detector, typed, expected)
 
+    def test_hotstring_capitalized(self):
+        hotstring_definitions = [HotstringDefinition('yl', Replace('yield'))]
+        hotstring_detector = self.get_basic_hotstring_detector(
+            hotstring_definitions)
+
+        typed = 'Yl '
+        expected = [None, None, ('Yl ', 'Yield ')]
+        self.check_hotstring_output(hotstring_detector, typed, expected)
+
+    def test_hotstring_upper(self):
+        hotstring_definitions = [HotstringDefinition('yl', Replace('yield'))]
+        hotstring_detector = self.get_basic_hotstring_detector(
+            hotstring_definitions)
+
+        typed = 'YL '
+        expected = [None, None, ('YL ', 'YIELD ')]
+        self.check_hotstring_output(hotstring_detector, typed, expected)
+
     def test_hotstring_as_string_end(self):
         """a normal hotstring should not trigger if it is only a subsring."""
         hotstring_definitions = [HotstringDefinition('yl', Replace('yield'))]
@@ -65,7 +83,7 @@ class TestHotstringDetector(TestCase):
         self.check_hotstring_output(hotstring_detector, typed, expected)
 
     def test_no_end_char_as_substring(self):
-        """Verified behavior with AHK 1.1.33.09"""
+        """This should not trigger."""
         hotstring_definitions = [
             HotstringDefinition(
                 'a',
@@ -77,7 +95,7 @@ class TestHotstringDetector(TestCase):
             hotstring_definitions)
 
         typed = 'Za'
-        expected = [None, ('a', 'abracadabra')]
+        expected = [None, None]
         self.check_hotstring_output(hotstring_detector, typed, expected)
 
     def test_no_end_char_backspace(self):
@@ -94,6 +112,22 @@ class TestHotstringDetector(TestCase):
 
         typed = 'a \b.'
         expected = [None] * 3 + [('a.', 'abracadabra')]
+        self.check_hotstring_output(hotstring_detector, typed, expected)
+
+    def test_match_suffix(self):
+        hotstring_definitions = [
+            HotstringDefinition(
+                'al',
+                Replace('airline'),
+                {HotstringFlags.MATCH_SUFFIX}
+                )
+            ]
+
+        hotstring_detector = self.get_basic_hotstring_detector(
+            hotstring_definitions)
+
+        typed = 'practical '
+        expected = [None] * 9 + [('al ', 'airline')]
         self.check_hotstring_output(hotstring_detector, typed, expected)
 
     def get_basic_hotstring_detector(self, hotstring_definitions):

@@ -23,7 +23,7 @@ class HotstringDefinition:
 
 
 class HotstringFlags(Enum):
-    MATCH_SUBSTRING = auto()
+    MATCH_SUFFIX = auto()
     NO_END_CHAR = auto()
     NO_BACKSPACE = auto()
     CASE_SENSITIVE = auto()
