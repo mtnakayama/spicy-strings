@@ -15,6 +15,17 @@ class TestHotstringDetector(TestCase):
         expected = [None, None, ('yl ', 'yield ')]
         self.check_hotstring_output(hotstring_detector, typed, expected)
 
+    def test_hotstring_case_insensitive_definition(self):
+        """A case-insensitive replacement can be defined upper case or lower
+        case"""
+        hotstring_definitions = [HotstringDefinition('YL', Replace('yield'))]
+        hotstring_detector = self.get_basic_hotstring_detector(
+            hotstring_definitions)
+
+        typed = 'yl '
+        expected = [None, None, ('yl ', 'yield ')]
+        self.check_hotstring_output(hotstring_detector, typed, expected)
+
     def test_hotstring_capitalized(self):
         hotstring_definitions = [HotstringDefinition('yl', Replace('yield'))]
         hotstring_detector = self.get_basic_hotstring_detector(
@@ -127,7 +138,33 @@ class TestHotstringDetector(TestCase):
             hotstring_definitions)
 
         typed = 'practical '
-        expected = [None] * 9 + [('al ', 'airline')]
+        expected = [None] * 9 + [('al ', 'airline ')]
+        self.check_hotstring_output(hotstring_detector, typed, expected)
+
+    def test_hotstring_no_backspace(self):
+        hotstring_definitions = [HotstringDefinition(
+            'yl',
+            Replace('yield'),
+            {HotstringFlags.NO_BACKSPACE}
+        )]
+        hotstring_detector = self.get_basic_hotstring_detector(
+            hotstring_definitions)
+
+        typed = 'yl.'
+        expected = [None, None, ('', 'yield')]
+        self.check_hotstring_output(hotstring_detector, typed, expected)
+
+    def test_hotstring_omit_end_char(self):
+        hotstring_definitions = [HotstringDefinition(
+            'yl',
+            Replace('yield'),
+            {HotstringFlags.OMIT_END_CHAR}
+        )]
+        hotstring_detector = self.get_basic_hotstring_detector(
+            hotstring_definitions)
+
+        typed = 'yl.'
+        expected = [None, None, ('yl.', 'yield')]
         self.check_hotstring_output(hotstring_detector, typed, expected)
 
     def get_basic_hotstring_detector(self, hotstring_definitions):

@@ -23,11 +23,13 @@ class HotstringDefinition:
 
 
 class HotstringFlags(Enum):
-    MATCH_SUFFIX = auto()
+    # flags for matching hotstrings
     NO_END_CHAR = auto()
-    NO_BACKSPACE = auto()
     CASE_SENSITIVE = auto()
+    MATCH_SUFFIX = auto()
+    # flags for replacing hotstrings
     IGNORE_CASE = auto()  # do not conform to typed case
+    NO_BACKSPACE = auto()
     OMIT_END_CHAR = auto()
 
 

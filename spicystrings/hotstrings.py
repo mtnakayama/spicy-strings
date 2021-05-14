@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-from collections.abc import Iterable
-from itertools import takewhile
+from collections.abc import Container, Iterable
+from itertools import chain, takewhile
 import logging
 import os
 import re
 import signal
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 from toolz import functoolz
 
@@ -25,6 +25,7 @@ import Xlib.protocol
 from . import ahk_parser
 from .actions import (Action, GlobalHotstringOptions, HotstringDefinition,
                       HotstringFlags)
+from .func import tautology
 from .keyboard import BaseTyper, Typer
 
 EXIT_FAILURE = 1
@@ -215,41 +216,40 @@ def replace_newlines_with_cr(string: str):
 
 
 class HotstringDetector:
-    """Contains the state of recently typed characters and determines when an
-    Action should be triggered."""
-
     MIN_BUFFER_SIZE = 128
 
     def __init__(self, hotstring_definitions: Iterable[HotstringDefinition],
                  global_hotstring_options: GlobalHotstringOptions):
+        """Contains the state of recently typed characters and determines when an
+        Action should be triggered.
+
+        Args:
+            hotstring_definitions: An Iterable containing the hotstring
+                definitions to detect. The definitions at the beginning have a
+                higher precedence than the definitions at the end.
+        """
 
         self.global_hotstring_options = global_hotstring_options
 
-        # a mapping of reversed hotstring to HotstringDefinition
-        self._end_char_hotstrings: dict[str, HotstringDefinition] = {}
-        # mapping for the hotstings that trigger without an end char
-        self._no_end_char_hotstrings: CharTrie[HotstringDefinition] = CharTrie()  # noqa
-        # mapping for hotstrings with the MATCH_SUFFIX flag set
-        self._suffix_hotstrings: CharTrie[HotstringDefinition] = CharTrie()
+        self._hotstring_map: CharTrie[
+            tuple[int, HotstringDefinition]] = CharTrie()
 
         maxlen = self._calc_maxlen(hotstring_definitions)
         self._char_stack: deque[str] = deque(maxlen=maxlen)
 
-        for hotstring_def in hotstring_definitions:
-            self._add_hotstring(hotstring_def)
+        self._add_hotstrings(hotstring_definitions)
 
     def _calc_maxlen(self, hotstring_definitions):
         longest = max(len(x.hotstring) for x in hotstring_definitions)
         return max(self.MIN_BUFFER_SIZE, longest * 2)
 
-    def _add_hotstring(self, hotstring_definition: HotstringDefinition):
-        match_str = ''.join(reversed(hotstring_definition.hotstring))
-
-        if HotstringFlags.NO_END_CHAR in hotstring_definition.flags:
-            self._no_end_char_hotstrings[match_str] = hotstring_definition
-        else:
-            print('end char')
-            self._end_char_hotstrings[match_str] = hotstring_definition
+    def _add_hotstrings(self,
+                        hotstring_definitions: Iterable[HotstringDefinition]):
+        for i, hotstring_def in enumerate(hotstring_definitions):
+            match_str = ''.join(reversed(hotstring_def.hotstring))
+            if HotstringFlags.CASE_SENSITIVE not in hotstring_def.flags:
+                match_str = match_str.lower()
+            self._hotstring_map[match_str] = (i, hotstring_def)
 
     def next_typed_char(self, char: str) -> \
             Optional[tuple[str, Action]]:
@@ -265,68 +265,98 @@ class HotstringDetector:
             char if applicable) and the HotstringDefinition that was triggered.
             None if there was no hotstring triggered.
         """
-        if char in self.global_hotstring_options.end_chars:
-            match_result = self._match_last_word()
-            if match_result:
-                self.reset_char_state()
-                matched_word, hotstring_definition = match_result
-                return self._prepare_replacement(matched_word,
-                                                 hotstring_definition, char)
-
         self._update_char_state(char)
 
-        match_result = self._match_end_of_string(self._no_end_char_hotstrings)
-        if match_result:
-            self.reset_char_state()
-            matched_word, hotstring_definition = match_result
-            return self._prepare_replacement(matched_word,
-                                             hotstring_definition)
+        typed = self._get_last_typed()
+        matched_results = self._match_results_end_char(typed)
 
-        return None
-
-    def _match_last_word(self) -> Optional[tuple[str, HotstringDefinition]]:
-        """Check for a hotstring only in the characters typed after an end char
-        """
-        end_chars = self.global_hotstring_options.end_chars
-        last_word = ''.join(takewhile(lambda x: x not in end_chars,
-                                      self._char_stack))
         try:
-            hotstring_definition = self._end_char_hotstrings[last_word.lower()]
-            return ''.join(reversed(last_word)), hotstring_definition
-        except KeyError:
+            _, trigger, hotstring_definition, end_char = next(
+                iter(matched_results))
+            trigger_forwards = ''.join(reversed(trigger))
+            return self._prepare_action(
+                trigger_forwards, hotstring_definition, end_char)
+        except StopIteration:
             return None
 
-    def _match_end_of_string(self, mapping: CharTrie[HotstringDefinition]
-                             ) -> Optional[tuple[str, HotstringDefinition]]:
-        """Check if the recently typed characters match a hotstring"""
+    def _match_results_end_char(self, typed: str) \
+            -> Iterable[tuple[int, str, HotstringDefinition, str]]:
+        """Get hotstrings activated by the last typed string
 
-        recently_typed = ''.join(self._char_stack)
-        step = mapping.longest_prefix(recently_typed.lower())
-        if step:
-            matched, hotstring_definition = step
-            matched_typed = ''.join(reversed(recently_typed[:len(matched)]))
-            return matched_typed, hotstring_definition
-        return None
+        Returns: a tuple containing the hotstring's priority, the replaced
+            text, the HotstringDefinition"""
 
-    def _prepare_replacement(self, matched: str,
-                             hotstring_definition: HotstringDefinition,
-                             end_char: str = ''
-                             ) -> Optional[tuple[str, Action]]:
+        end_chars = self.global_hotstring_options.end_chars
+        most_recent_char = typed[0]
+        if most_recent_char in end_chars:
+            for matched in self._match_results_case(typed[1:]):
+                priority, trigger, hotstring_definition = matched
+                yield (priority, most_recent_char + trigger,
+                       hotstring_definition, most_recent_char)
 
-        processors: list[Callable[[str], str]] = []
+        for matched in self._match_results_case(typed):
+            hotstring_definition = matched[2]
+            if HotstringFlags.NO_END_CHAR in hotstring_definition.flags:
+                yield (*matched, '')
 
-        if end_char:
-            processors.append(lambda x: x + end_char)
+    def _match_results_case(self, typed: str) \
+            -> Iterable[tuple[int, str, HotstringDefinition]]:
 
-        if matched.isupper():
-            processors.append(lambda x: x.upper())
-        elif matched[0].isupper():
-            processors.append(lambda x: x.capitalize())
+        yield from self._match_results(typed)
 
-        action = functoolz.compose_left(hotstring_definition.action,  # type: ignore # noqa
-                                        *processors)
+        for matched in self._match_results(typed.lower()):
+            precedence, trigger_lower, hotstring_definition = matched
+            if (HotstringFlags.CASE_SENSITIVE
+                    not in hotstring_definition.flags):
+                trigger = typed[:len(trigger_lower)]
+                yield precedence, trigger, hotstring_definition
 
-        return (matched + end_char, action)
+    def _match_results(self, to_match: str
+                       ) -> Iterable[tuple[int, str, HotstringDefinition]]:
+        for k, v in self._hotstring_map.prefixes(to_match):
+            priority, hotstring_definition = v
+            trigger_len = len(k)
+            trigger = ''.join(to_match[:trigger_len])
+
+            if (len(to_match) == trigger_len
+                    or HotstringFlags.MATCH_SUFFIX in hotstring_definition.flags):  # noqa
+                yield priority, trigger, hotstring_definition
+
+    def _prepare_action(self, trigger_forwards: str,
+                        hotstring_definition: HotstringDefinition,
+                        end_char: str) -> tuple[str, Action]:
+
+        transformers: list[Callable[[str], str]] = []
+
+        if (HotstringFlags.OMIT_END_CHAR not in hotstring_definition.flags
+                and HotstringFlags.NO_BACKSPACE
+                not in hotstring_definition.flags):
+            transformers.append(lambda x: x + end_char)
+
+        if HotstringFlags.IGNORE_CASE not in hotstring_definition.flags:
+            if trigger_forwards.isupper():
+                transformers.append(lambda x: x.upper())
+            elif trigger_forwards[0].isupper():
+                transformers.append(lambda x: x.capitalize())
+
+        action = functoolz.compose_left(
+            hotstring_definition.action, *transformers)  # type: ignore
+
+        replace_string = trigger_forwards
+        if HotstringFlags.NO_BACKSPACE in hotstring_definition.flags:
+            replace_string = ''
+        return replace_string, action
+
+    def _get_last_typed(self) -> str:
+        """Returns the last "word" typed. This will include one end char (if
+        it was the last character typed) and then all characters following
+        until the next end char."""
+        end_chars = self.global_hotstring_options.end_chars
+        it = iter(self._char_stack)
+        # yield most_recent character regardless of if it was an end_char
+        most_recent = next(it)
+        rest = ''.join(takewhile(lambda x: x not in end_chars, it))
+        return most_recent + rest
 
     def _update_char_state(self, char: str):
         """Append or delete characters from buffer"""
