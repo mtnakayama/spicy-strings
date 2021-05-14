@@ -15,6 +15,23 @@ class TestHotstringDetector(TestCase):
         expected = [None, None, ('yl ', 'yield ')]
         self.check_hotstring_output(hotstring_detector, typed, expected)
 
+    def test_hotstring_empty_backspace(self):
+        hotstring_detector = self.get_basic_hotstring_detector([])
+
+        typed = '\b'
+        expected = [None]
+        self.check_hotstring_output(hotstring_detector, typed, expected)
+
+    def test_hotstring_back_to_back(self):
+        """Make sure that the buffer is cleared when a match is found."""
+        hotstring_definitions = [HotstringDefinition('ab', Replace('abc'))]
+        hotstring_detector = self.get_basic_hotstring_detector(
+            hotstring_definitions)
+
+        typed = 'ab \b\bb '
+        expected = [None, None, ('ab ', 'abc ')] + [None] * 4
+        self.check_hotstring_output(hotstring_detector, typed, expected)
+
     def test_hotstring_case_insensitive_definition(self):
         """A case-insensitive replacement can be defined upper case or lower
         case"""

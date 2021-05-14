@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-from collections.abc import Container, Iterable
-from itertools import chain, takewhile
+from collections.abc import Iterable
+from itertools import takewhile
 import logging
 import os
 import re
 import signal
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, Optional
 
 from toolz import functoolz
 
@@ -25,7 +25,6 @@ import Xlib.protocol
 from . import ahk_parser
 from .actions import (Action, GlobalHotstringOptions, HotstringDefinition,
                       HotstringFlags)
-from .func import tautology
 from .keyboard import BaseTyper, Typer
 
 EXIT_FAILURE = 1
@@ -240,7 +239,10 @@ class HotstringDetector:
         self._add_hotstrings(hotstring_definitions)
 
     def _calc_maxlen(self, hotstring_definitions):
-        longest = max(len(x.hotstring) for x in hotstring_definitions)
+        longest = max(
+            (len(x.hotstring) for x in hotstring_definitions),
+            default=0
+        )
         return max(self.MIN_BUFFER_SIZE, longest * 2)
 
     def _add_hotstrings(self,
@@ -268,11 +270,15 @@ class HotstringDetector:
         self._update_char_state(char)
 
         typed = self._get_last_typed()
+        if not typed:
+            return None
+
         matched_results = self._match_results_end_char(typed)
 
         try:
             _, trigger, hotstring_definition, end_char = next(
                 iter(matched_results))
+            self.reset_char_state()
             trigger_forwards = ''.join(reversed(trigger))
             return self._prepare_action(
                 trigger_forwards, hotstring_definition, end_char)
@@ -353,8 +359,13 @@ class HotstringDetector:
         until the next end char."""
         end_chars = self.global_hotstring_options.end_chars
         it = iter(self._char_stack)
+
         # yield most_recent character regardless of if it was an end_char
-        most_recent = next(it)
+        try:
+            most_recent = next(it)
+        except StopIteration:
+            return ''
+
         rest = ''.join(takewhile(lambda x: x not in end_chars, it))
         return most_recent + rest
 
